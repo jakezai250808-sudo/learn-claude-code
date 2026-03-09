@@ -28,6 +28,7 @@ import subprocess
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 from urllib import request
 
 
@@ -48,12 +49,12 @@ def load_env_file(path: str = ".env", override: bool = True):
 
 @dataclass
 class MessageResponse:
-    content: list[dict]
+    content: List[Dict[str, Any]]
     stop_reason: str
 
 
 class AnthropicCompat:
-    def __init__(self, base_url: str | None = None):
+    def __init__(self, base_url: Optional[str] = None):
         self.base_url = (base_url or "https://api.anthropic.com").rstrip("/")
         self.api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
