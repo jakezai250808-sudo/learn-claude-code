@@ -6,8 +6,9 @@ from __future__ import annotations
 import shlex
 import shutil
 import subprocess
-from pathlib import Path
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 
 @dataclass
@@ -30,6 +31,12 @@ class RemoteCommandExecutor:
     remote_cwd: str = "~"
     private_key: str | None = None
     password: str | None = None
+    debug: bool = False
+
+    def _log(self, message: str) -> None:
+        if self.debug:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[RemoteCommandExecutor][{ts}] {message}")
 
     def _resolve_private_key(self) -> str | None:
         if not self.private_key:
@@ -44,14 +51,12 @@ class RemoteCommandExecutor:
         """返回可安全拼接到 bash -lc 的远程工作目录。"""
         cwd = (self.remote_cwd or "").strip()
         if cwd in ("", "~"):
-            # 不能把 ~ 用 shlex.quote 包起来，否则不会进行 shell 展开。
             return "$HOME"
         return shlex.quote(cwd)
 
     def _build_ssh_cmd(self, remote_command: str) -> list[str]:
         ssh_cmd: list[str] = []
 
-        # 若提供密码，使用 sshpass；否则默认走 key/agent
         if self.password:
             if shutil.which("sshpass") is None:
                 raise RuntimeError(
@@ -71,10 +76,8 @@ class RemoteCommandExecutor:
         ])
 
         if self.password:
-            # 允许密码认证
             ssh_cmd.extend(["-o", "BatchMode=no"])
         else:
-            # 无密码时保持非交互，避免卡住
             ssh_cmd.extend(["-o", "BatchMode=yes"])
 
         private_key = self._resolve_private_key()
@@ -90,8 +93,17 @@ class RemoteCommandExecutor:
         except RuntimeError as exc:
             return 2, "", str(exc)
 
+        safe_cmd_for_log = ["***" if x == self.password else x for x in ssh_cmd]
+        self._log(f"SSH command: {' '.join(safe_cmd_for_log)}")
         proc = subprocess.run(ssh_cmd, capture_output=True, text=True)
-        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+        stdout = proc.stdout.strip()
+        stderr = proc.stderr.strip()
+        self._log(f"SSH exit={proc.returncode}")
+        if stdout:
+            self._log(f"SSH stdout: {stdout}")
+        if stderr:
+            self._log(f"SSH stderr: {stderr}")
+        return proc.returncode, stdout, stderr
 
     def execute(self, command: str) -> str:
         """函数接口：传入命令字符串并返回执行结果。"""
@@ -99,16 +111,25 @@ class RemoteCommandExecutor:
         if not command:
             return "错误：命令不能为空。"
 
+        self._log(f"execute() received: {command}")
+        self._log(f"current remote_cwd state: {self.remote_cwd}")
+
         if command.startswith("cd ") or command == "cd":
             target = command[2:].strip() or "~"
             return self._handle_cd(target)
 
         if command.startswith("python3"):
             remote_shell = f"cd {self._base_remote_cwd()} && {command}"
+            self._log(f"python3 remote shell: {remote_shell}")
             rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(remote_shell)}")
             if rc == 0:
                 return out or "(no output)"
-            return f"执行失败 (exit={rc})\n{err or out}"
+            return (
+                f"执行失败 (exit={rc})\n"
+                f"remote_cwd={self.remote_cwd}\n"
+                f"remote_shell={remote_shell}\n"
+                f"{err or out}"
+            )
 
         return "错误：仅允许执行 'cd' 和 'python3' 命令。"
 
@@ -118,31 +139,36 @@ class RemoteCommandExecutor:
             f"&& cd {shlex.quote(target)} "
             "&& pwd"
         )
+        self._log(f"cd probe shell: {probe}")
         rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(probe)}")
         if rc != 0:
-            return f"切换目录失败\n{err or out}"
+            return (
+                "切换目录失败\n"
+                f"remote_cwd={self.remote_cwd}\n"
+                f"cd_target={target}\n"
+                f"{err or out}"
+            )
 
         self.remote_cwd = out
+        self._log(f"remote_cwd updated to: {self.remote_cwd}")
         return f"当前远程目录：{self.remote_cwd}"
 
 
 if __name__ == "__main__":
-    # ===== 使用示例 1：私钥认证（推荐） =====
-    # 注意：private_key 支持 "~"，内部会自动展开并校验文件是否存在。
-    # 若私钥带口令，请先 `ssh-add ~/.ssh/id_rsa` 后再运行。
     by_key = RemoteCommandExecutor(
         host="10.173.21.118",
-        user="ubuntu",  # 替换为实际用户名
-        private_key="~/.ssh/id_rsa",  # 替换为你的私钥路径
+        user="ubuntu",
+        private_key="~/.ssh/id_rsa",
+        debug=True,
     )
     print(by_key.execute("cd /tmp"))
     print(by_key.execute("python3 -c \"import os; print('cwd=', os.getcwd())\""))
 
-    # ===== 使用示例 2：密码认证（需安装 sshpass） =====
     by_password = RemoteCommandExecutor(
         host="10.173.21.118",
-        user="ubuntu",  # 替换为实际用户名
-        password="your_password_here",  # 替换为实际密码
+        user="ubuntu",
+        password="your_password_here",
+        debug=True,
     )
     print(by_password.execute("cd /tmp"))
     print(by_password.execute("python3 -c \"import os; print('cwd=', os.getcwd())\""))
