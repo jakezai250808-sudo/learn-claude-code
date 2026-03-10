@@ -49,11 +49,12 @@ class RemoteCommandExecutor:
         return str(key_path)
 
     def _base_remote_cwd(self) -> str:
-        """返回可安全拼接到 bash -lc 的远程工作目录。"""
+        """返回可安全拼接到 bash -lc 的远程工作目录；未设置时返回空字符串。"""
         cwd = (self.remote_cwd or "").strip()
         if cwd in ("", "~"):
-            return "$HOME"
+            return ""
         return shlex.quote(cwd)
+
 
     def _build_ssh_cmd(self, remote_command: str) -> list[str]:
         ssh_cmd: list[str] = []
@@ -122,7 +123,8 @@ class RemoteCommandExecutor:
         if command.startswith("python3"):
             if self.remote_cwd in ("", "~"):
                 self._log("warning: remote_cwd still default (~). 如果你在 handle 中每次都 new executor，cd 状态不会延续。")
-            remote_shell = f"cd {self._base_remote_cwd()} && {command}"
+            base_cwd = self._base_remote_cwd()
+            remote_shell = f"cd {base_cwd} && {command}" if base_cwd else command
             self._log(f"python3 remote shell: {remote_shell}")
             rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(remote_shell)}")
             if rc == 0:
@@ -137,10 +139,11 @@ class RemoteCommandExecutor:
         return "错误：仅允许执行 'cd' 和 'python3' 命令。"
 
     def _handle_cd(self, target: str) -> str:
+        base_cwd = self._base_remote_cwd()
         probe = (
-            f"cd {self._base_remote_cwd()} "
-            f"&& cd {shlex.quote(target)} "
-            "&& pwd"
+            f"cd {base_cwd} && cd {shlex.quote(target)} && pwd"
+            if base_cwd else
+            f"cd {shlex.quote(target)} && pwd"
         )
         self._log(f"cd probe shell: {probe}")
         rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(probe)}")
