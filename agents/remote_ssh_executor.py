@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import shlex
+import hashlib
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -34,6 +35,9 @@ class RemoteCommandExecutor:
     password: str | None = None
     debug: bool = False
     apply_cwd_on_python: bool = False
+    enable_connection_reuse: bool = True
+    control_path: str | None = None
+    control_persist: str = "300s"
 
     def _log(self, message: str) -> None:
         if self.debug:
@@ -57,6 +61,17 @@ class RemoteCommandExecutor:
         return shlex.quote(cwd)
 
 
+    def _resolve_control_path(self) -> str:
+        """返回 SSH 连接复用用的 ControlPath。"""
+        if self.control_path:
+            return self.control_path
+
+        raw = f"{self.user}@{self.host}:{self.port}"
+        digest = hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]
+        base_dir = Path('/tmp/remote_ssh_mux')
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return str(base_dir / f"mux_{digest}")
+
     def _build_ssh_cmd(self, remote_command: str) -> list[str]:
         ssh_cmd: list[str] = []
 
@@ -78,6 +93,14 @@ class RemoteCommandExecutor:
             str(self.port),
         ])
 
+        if self.enable_connection_reuse:
+            control_path = self._resolve_control_path()
+            ssh_cmd.extend([
+                "-o", "ControlMaster=auto",
+                "-o", f"ControlPersist={self.control_persist}",
+                "-o", f"ControlPath={control_path}",
+            ])
+
         if self.password:
             ssh_cmd.extend(["-o", "BatchMode=no"])
         else:
@@ -96,6 +119,7 @@ class RemoteCommandExecutor:
         except RuntimeError as exc:
             return 2, "", str(exc)
 
+        self._log(f"reuse: enabled={self.enable_connection_reuse}, control_path={self.control_path or self._resolve_control_path() if self.enable_connection_reuse else None}")
         safe_cmd_for_log = ["***" if x == self.password else x for x in ssh_cmd]
         self._log(f"SSH command: {' '.join(safe_cmd_for_log)}")
         proc = subprocess.run(ssh_cmd, capture_output=True, text=True)

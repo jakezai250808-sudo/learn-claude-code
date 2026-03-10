@@ -6,10 +6,18 @@ from remote_ssh_executor import get_remote_executor
 from remote_ssh_executor import RemoteCommandExecutor
 
 import json
+import hashlib
 from pathlib import Path
 
 
 _STATE_FILE = Path('.remote_cwd_state.json')
+
+
+def _control_path_for_session(session_id: str) -> str:
+    digest = hashlib.sha1(session_id.encode('utf-8')).hexdigest()[:16]
+    base_dir = Path('/tmp/remote_ssh_mux')
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return str(base_dir / f'plugin_mux_{digest}')
 
 
 def _build_session_id(msg: Msg) -> str:
@@ -49,7 +57,7 @@ def _set_saved_cwd(session_id: str, cwd: str) -> None:
     _save_state(state)
 
 
-def _build_executor() -> RemoteCommandExecutor:
+def _build_executor(session_id: str) -> RemoteCommandExecutor:
     """无状态 handle 场景：每次调用新建 executor。"""
     return RemoteCommandExecutor(
         host="10.173.21.118",
@@ -57,6 +65,8 @@ def _build_executor() -> RemoteCommandExecutor:
         password="",  # 替换为实际密码
         debug=True,
         apply_cwd_on_python=False,
+        enable_connection_reuse=True,
+        control_path=_control_path_for_session(session_id),
     )
 
 
@@ -76,9 +86,10 @@ def handle(msg: Msg):
         return
 
     session_id = _build_session_id(msg)
-    executor = _build_executor()
+    executor = _build_executor(session_id)
 
     command = (msg.params or '').strip()
+    print(f"[plugin] session_id={session_id}, control_path={_control_path_for_session(session_id)}")
 
     if command.startswith('python3'):
         saved_cwd = _get_saved_cwd(session_id)
