@@ -6,6 +6,7 @@ from __future__ import annotations
 import shlex
 import shutil
 import subprocess
+from pathlib import Path
 from dataclasses import dataclass
 
 
@@ -29,6 +30,15 @@ class RemoteCommandExecutor:
     remote_cwd: str = "~"
     private_key: str | None = None
     password: str | None = None
+
+    def _resolve_private_key(self) -> str | None:
+        if not self.private_key:
+            return None
+
+        key_path = Path(self.private_key).expanduser()
+        if not key_path.exists():
+            raise RuntimeError(f"私钥文件不存在: {key_path}")
+        return str(key_path)
 
     def _build_ssh_cmd(self, remote_command: str) -> list[str]:
         ssh_cmd: list[str] = []
@@ -59,8 +69,9 @@ class RemoteCommandExecutor:
             # 无密码时保持非交互，避免卡住
             ssh_cmd.extend(["-o", "BatchMode=yes"])
 
-        if self.private_key:
-            ssh_cmd.extend(["-i", self.private_key])
+        private_key = self._resolve_private_key()
+        if private_key:
+            ssh_cmd.extend(["-i", private_key, "-o", "IdentitiesOnly=yes"])
 
         ssh_cmd.extend([f"{self.user}@{self.host}", remote_command])
         return ssh_cmd
@@ -109,6 +120,8 @@ class RemoteCommandExecutor:
 
 if __name__ == "__main__":
     # ===== 使用示例 1：私钥认证（推荐） =====
+    # 注意：private_key 支持 "~"，内部会自动展开并校验文件是否存在。
+    # 若私钥带口令，请先 `ssh-add ~/.ssh/id_rsa` 后再运行。
     by_key = RemoteCommandExecutor(
         host="10.173.21.118",
         user="ubuntu",  # 替换为实际用户名
