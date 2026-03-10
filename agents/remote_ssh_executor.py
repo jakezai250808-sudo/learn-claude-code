@@ -40,6 +40,14 @@ class RemoteCommandExecutor:
             raise RuntimeError(f"私钥文件不存在: {key_path}")
         return str(key_path)
 
+    def _base_remote_cwd(self) -> str:
+        """返回可安全拼接到 bash -lc 的远程工作目录。"""
+        cwd = (self.remote_cwd or "").strip()
+        if cwd in ("", "~"):
+            # 不能把 ~ 用 shlex.quote 包起来，否则不会进行 shell 展开。
+            return "$HOME"
+        return shlex.quote(cwd)
+
     def _build_ssh_cmd(self, remote_command: str) -> list[str]:
         ssh_cmd: list[str] = []
 
@@ -96,7 +104,7 @@ class RemoteCommandExecutor:
             return self._handle_cd(target)
 
         if command.startswith("python3"):
-            remote_shell = f"cd {shlex.quote(self.remote_cwd)} && {command}"
+            remote_shell = f"cd {self._base_remote_cwd()} && {command}"
             rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(remote_shell)}")
             if rc == 0:
                 return out or "(no output)"
@@ -106,7 +114,7 @@ class RemoteCommandExecutor:
 
     def _handle_cd(self, target: str) -> str:
         probe = (
-            f"cd {shlex.quote(self.remote_cwd)} "
+            f"cd {self._base_remote_cwd()} "
             f"&& cd {shlex.quote(target)} "
             "&& pwd"
         )
@@ -136,4 +144,6 @@ if __name__ == "__main__":
         user="ubuntu",  # 替换为实际用户名
         password="your_password_here",  # 替换为实际密码
     )
+    print(by_password.execute("cd /tmp"))
+    print(by_password.execute("python3 -c \"import os; print('cwd=', os.getcwd())\""))
     print(by_password.execute("python3 -c \"print(sum(range(1, 11)))\""))
