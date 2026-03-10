@@ -33,6 +33,7 @@ class RemoteCommandExecutor:
     private_key: str | None = None
     password: str | None = None
     debug: bool = False
+    apply_cwd_on_python: bool = False
 
     def _log(self, message: str) -> None:
         if self.debug:
@@ -124,8 +125,15 @@ class RemoteCommandExecutor:
             if self.remote_cwd in ("", "~"):
                 self._log("warning: remote_cwd still default (~). 如果你在 handle 中每次都 new executor，cd 状态不会延续。")
             base_cwd = self._base_remote_cwd()
-            remote_shell = f"cd {base_cwd} && {command}" if base_cwd else command
-            self._log(f"python3 remote shell: {remote_shell}")
+            remote_shell = (
+                f"cd {base_cwd} && {command}"
+                if (self.apply_cwd_on_python and base_cwd)
+                else command
+            )
+            self._log(
+                f"python3 remote shell: {remote_shell} "
+                f"(apply_cwd_on_python={self.apply_cwd_on_python})"
+            )
             rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(remote_shell)}")
             if rc == 0:
                 return out or "(no output)"
@@ -182,6 +190,7 @@ if __name__ == "__main__":
         user="ubuntu",
         private_key="~/.ssh/id_rsa",
         debug=True,
+        apply_cwd_on_python=True,
     )
     print(by_key.execute("cd /tmp"))
     print(by_key.execute("python3 -c \"import os; print('cwd=', os.getcwd())\""))
@@ -191,6 +200,7 @@ if __name__ == "__main__":
         user="ubuntu",
         password="your_password_here",
         debug=True,
+        apply_cwd_on_python=True,
     )
     print(by_password.execute("cd /tmp"))
     print(by_password.execute("python3 -c \"import os; print('cwd=', os.getcwd())\""))

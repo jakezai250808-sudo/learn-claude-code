@@ -56,6 +56,7 @@ def _build_executor() -> RemoteCommandExecutor:
         user="nvidia",  # 替换为实际用户名
         password="",  # 替换为实际密码
         debug=True,
+        apply_cwd_on_python=False,
     )
 
 
@@ -68,7 +69,7 @@ def handle(msg: Msg):
             "当前支持命令：\n"
             "1) cd <目录>  例如: cd /home/nvidia\n"
             "2) python3 ... 例如: python3 -c \"import os; print(os.getcwd())\"\n"
-            "说明：handle 无状态调用时，会把每个会话最近一次 cd 的目录持久化到本地文件。",
+            "说明：handle 无状态调用时，会把每个会话最近一次 cd 的目录持久化到本地文件；python3 默认不再自动拼接 cd。",
             msg.receiver,
         )
         recv_next_msg(msg)
@@ -82,8 +83,7 @@ def handle(msg: Msg):
     if command.startswith('python3'):
         saved_cwd = _get_saved_cwd(session_id)
         if saved_cwd:
-            executor.remote_cwd = saved_cwd
-            print(f"[plugin] use saved cwd for {session_id}: {saved_cwd}")
+            print(f"[plugin] found saved cwd for {session_id}: {saved_cwd} (apply_cwd_on_python=False, 不拼接 cd)")
 
     result = executor.execute(command)
 
