@@ -5,15 +5,30 @@ from util.api.by_token.api import recv_next_msg
 from remote_ssh_executor import get_remote_executor
 
 
-def _get_executor(session_id: str):
-    """按会话复用 executor，确保 `cd` 后目录可延续。"""
-    return get_remote_executor(
+def _build_session_id(msg: Msg) -> str:
+    """构造稳定会话键，避免只用 sender 导致无法复用 executor。"""
+    for key in ("session_id", "conversation_id", "chat_id", "thread_id"):
+        value = getattr(msg, key, None)
+        if value:
+            return f"{key}:{value}"
+
+    sender = getattr(msg, "sender", None) or "unknown_sender"
+    receiver = getattr(msg, "receiver", None) or "unknown_receiver"
+    return f"sender_receiver:{sender}->{receiver}"
+
+
+def _get_executor(msg: Msg):
+    """按稳定会话键复用 executor，确保 `cd` 后目录可延续。"""
+    session_id = _build_session_id(msg)
+    executor = get_remote_executor(
         session_id=session_id,
         host="10.173.21.118",
         user="nvidia",  # 替换为实际用户名
         password="",  # 替换为实际密码
         debug=True,
     )
+    print(f"[plugin] session_id={session_id}, executor_id={id(executor)}")
+    return executor
 
 
 def handle(msg: Msg):
@@ -33,7 +48,7 @@ def handle(msg: Msg):
         return
 
     # 后续消息：执行远程命令并返回结果
-    executor = _get_executor(session_id=msg.sender)
+    executor = _get_executor(msg)
     result = executor.execute(msg.params)
     send_msg(result, msg.receiver)
     recv_next_msg(msg)
