@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Dict
 
 
 @dataclass
@@ -119,6 +120,8 @@ class RemoteCommandExecutor:
             return self._handle_cd(target)
 
         if command.startswith("python3"):
+            if self.remote_cwd in ("", "~"):
+                self._log("warning: remote_cwd still default (~). 如果你在 handle 中每次都 new executor，cd 状态不会延续。")
             remote_shell = f"cd {self._base_remote_cwd()} && {command}"
             self._log(f"python3 remote shell: {remote_shell}")
             rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(remote_shell)}")
@@ -154,7 +157,23 @@ class RemoteCommandExecutor:
         return f"当前远程目录：{self.remote_cwd}"
 
 
+# 可选：为“handle 会被反复调用”的场景提供会话级 executor 复用。
+_EXECUTOR_POOL: Dict[str, "RemoteCommandExecutor"] = {}
+
+
+def get_remote_executor(session_id: str, **kwargs) -> "RemoteCommandExecutor":
+    """按 session_id 复用 executor，保证 cd 后目录状态可延续。"""
+    if session_id not in _EXECUTOR_POOL:
+        _EXECUTOR_POOL[session_id] = RemoteCommandExecutor(**kwargs)
+    return _EXECUTOR_POOL[session_id]
+
+
 if __name__ == "__main__":
+    # handle 场景建议：
+    # ex = get_remote_executor("demo-user", host="10.173.21.118", user="ubuntu", password="xxx", debug=True)
+    # print(ex.execute("cd /home"))
+    # print(ex.execute("python3 -c \"import os; print(os.getcwd())\""))
+
     by_key = RemoteCommandExecutor(
         host="10.173.21.118",
         user="ubuntu",
