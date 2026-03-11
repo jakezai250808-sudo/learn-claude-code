@@ -7,6 +7,7 @@ import shlex
 import hashlib
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,11 @@ class RemoteCommandExecutor:
     enable_connection_reuse: bool = True
     control_path: str | None = None
     control_persist: str = "300s"
+    screen_session_name: str | None = None
+    command_wait_timeout: float = 15.0
+
+    def __post_init__(self) -> None:
+        self._command_index = 0
 
     def _log(self, message: str) -> None:
         if self.debug:
@@ -113,6 +119,22 @@ class RemoteCommandExecutor:
         ssh_cmd.extend([f"{self.user}@{self.host}", remote_command])
         return ssh_cmd
 
+    @staticmethod
+    def _escape_for_ansi_c(value: str) -> str:
+        return (
+            value
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n")
+        )
+
+    def _screen_name(self) -> str:
+        if self.screen_session_name:
+            return self.screen_session_name
+        raw = f"{self.user}@{self.host}:{self.port}"
+        digest = hashlib.sha1(raw.encode('utf-8')).hexdigest()[:10]
+        return f"rse_{digest}"
+
     def _run_ssh(self, remote_command: str) -> tuple[int, str, str]:
         try:
             ssh_cmd = self._build_ssh_cmd(remote_command)
@@ -132,6 +154,65 @@ class RemoteCommandExecutor:
             self._log(f"SSH stderr: {stderr}")
         return proc.returncode, stdout, stderr
 
+    def _ensure_screen_session(self) -> tuple[bool, str]:
+        session_name = self._screen_name()
+        q_name = shlex.quote(session_name)
+        check_cmd = f"bash -lc {shlex.quote(f'screen -list {q_name} >/dev/null 2>&1')}"
+        rc, _, _ = self._run_ssh(check_cmd)
+        if rc == 0:
+            return True, session_name
+
+        start_shell = f"screen -dmS {q_name} bash"
+        rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(start_shell)}")
+        if rc != 0:
+            return False, f"启动 screen 会话失败: {err or out}"
+
+        return True, session_name
+
+    def _execute_in_screen(self, shell_command: str) -> tuple[int, str]:
+        ok, info = self._ensure_screen_session()
+        if not ok:
+            return 2, info
+
+        session_name = info
+        self._command_index += 1
+        marker = f"{int(time.time() * 1000)}_{self._command_index}"
+        safe_session = ''.join(ch if ch.isalnum() else '_' for ch in session_name)
+        out_file = f"/tmp/{safe_session}_{marker}.out"
+        rc_file = f"/tmp/{safe_session}_{marker}.rc"
+
+        wrapped = f"{{ {shell_command}; }} > {shlex.quote(out_file)} 2>&1; echo $? > {shlex.quote(rc_file)}"
+        stuffed = self._escape_for_ansi_c(wrapped + "\n")
+        send_cmd = f"screen -S {shlex.quote(session_name)} -X stuff $'{stuffed}'"
+        rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(send_cmd)}")
+        if rc != 0:
+            return 2, f"发送命令到 screen 失败: {err or out}"
+
+        wait_script = (
+            f"for _ in $(seq 1 {int(self.command_wait_timeout * 10)}); do "
+            f"[ -f {shlex.quote(rc_file)} ] && break; sleep 0.1; "
+            f"done; "
+            f"if [ ! -f {shlex.quote(rc_file)} ]; then echo __TIMEOUT__; exit 124; fi; "
+            f"cat {shlex.quote(rc_file)}"
+        )
+        rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(wait_script)}")
+        if rc != 0:
+            return 2, f"等待命令执行结果失败: {err or out}"
+        if out.strip() == "__TIMEOUT__":
+            return 124, "执行超时，未在预期时间内收到结果。"
+
+        try:
+            cmd_rc = int(out.strip().splitlines()[-1])
+        except Exception:
+            cmd_rc = 1
+
+        read_script = (
+            f"cat {shlex.quote(out_file)} 2>/dev/null; "
+            f"rm -f {shlex.quote(out_file)} {shlex.quote(rc_file)}"
+        )
+        _, cmd_out, _ = self._run_ssh(f"bash -lc {shlex.quote(read_script)}")
+        return cmd_rc, cmd_out
+
     def execute(self, command: str) -> str:
         """函数接口：传入命令字符串并返回执行结果。"""
         command = command.strip()
@@ -148,43 +229,31 @@ class RemoteCommandExecutor:
         if command.startswith("python3"):
             if self.remote_cwd in ("", "~"):
                 self._log("warning: remote_cwd still default (~). 如果你在 handle 中每次都 new executor，cd 状态不会延续。")
-            base_cwd = self._base_remote_cwd()
-            remote_shell = (
-                f"cd {base_cwd} && {command}"
-                if (self.apply_cwd_on_python and base_cwd)
-                else command
-            )
+            remote_shell = command
             self._log(
                 f"python3 remote shell: {remote_shell} "
                 f"(apply_cwd_on_python={self.apply_cwd_on_python})"
             )
-            rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(remote_shell)}")
+            rc, out = self._execute_in_screen(remote_shell)
             if rc == 0:
                 return out or "(no output)"
             return (
                 f"执行失败 (exit={rc})\n"
-                f"remote_cwd={self.remote_cwd}\n"
                 f"remote_shell={remote_shell}\n"
-                f"{err or out}"
+                f"{out}"
             )
 
         return "错误：仅允许执行 'cd' 和 'python3' 命令。"
 
     def _handle_cd(self, target: str) -> str:
-        base_cwd = self._base_remote_cwd()
-        probe = (
-            f"cd {base_cwd} && cd {shlex.quote(target)} && pwd"
-            if base_cwd else
-            f"cd {shlex.quote(target)} && pwd"
-        )
+        probe = f"cd {shlex.quote(target)} && pwd"
         self._log(f"cd probe shell: {probe}")
-        rc, out, err = self._run_ssh(f"bash -lc {shlex.quote(probe)}")
+        rc, out = self._execute_in_screen(probe)
         if rc != 0:
             return (
                 "切换目录失败\n"
-                f"remote_cwd={self.remote_cwd}\n"
                 f"cd_target={target}\n"
-                f"{err or out}"
+                f"{out}"
             )
 
         self.remote_cwd = out
