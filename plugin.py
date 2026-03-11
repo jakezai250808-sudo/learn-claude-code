@@ -3,14 +3,8 @@ from util.api.by_token.send_msg import send_msg
 from util.api.by_token.api import recv_next_msg
 
 from remote_ssh_executor import get_remote_executor
-from remote_ssh_executor import RemoteCommandExecutor
-
-import json
 import hashlib
 from pathlib import Path
-
-
-_STATE_FILE = Path('.remote_cwd_state.json')
 
 
 def _control_path_for_session(session_id: str) -> str:
@@ -31,42 +25,17 @@ def _build_session_id(msg: Msg) -> str:
     return f"sender_receiver:{sender}->{receiver}"
 
 
-def _load_state() -> dict:
-    if not _STATE_FILE.exists():
-        return {}
-    try:
-        return json.loads(_STATE_FILE.read_text(encoding='utf-8'))
-    except Exception:
-        return {}
-
-
-def _save_state(state: dict) -> None:
-    _STATE_FILE.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2),
-        encoding='utf-8',
-    )
-
-
-def _get_saved_cwd(session_id: str) -> str | None:
-    return _load_state().get(session_id)
-
-
-def _set_saved_cwd(session_id: str, cwd: str) -> None:
-    state = _load_state()
-    state[session_id] = cwd
-    _save_state(state)
-
-
-def _build_executor(session_id: str) -> RemoteCommandExecutor:
-    """无状态 handle 场景：每次调用新建 executor。"""
-    return RemoteCommandExecutor(
+def _build_executor(session_id: str):
+    """按 session_id 复用 executor，实现同会话命令共享一个远端 screen。"""
+    return get_remote_executor(
+        session_id,
         host="10.173.21.118",
         user="nvidia",  # 替换为实际用户名
         password="",  # 替换为实际密码
         debug=True,
-        apply_cwd_on_python=False,
         enable_connection_reuse=True,
         control_path=_control_path_for_session(session_id),
+        screen_session_name=f"plugin_{hashlib.sha1(session_id.encode('utf-8')).hexdigest()[:10]}",
     )
 
 
@@ -79,7 +48,7 @@ def handle(msg: Msg):
             "当前支持命令：\n"
             "1) cd <目录>  例如: cd /home/nvidia\n"
             "2) python3 ... 例如: python3 -c \"import os; print(os.getcwd())\"\n"
-            "说明：handle 无状态调用时，会把每个会话最近一次 cd 的目录持久化到本地文件；python3 不做命令拼接；若有历史目录，会先单独执行一次 cd，再单独执行 python3。",
+            "说明：同一个会话会复用同一个 executor，并在远端复用同一个 screen，会话内的 cd 目录会自然延续。",
             msg.receiver,
         )
         recv_next_msg(msg)
@@ -91,20 +60,7 @@ def handle(msg: Msg):
     command = (msg.params or '').strip()
     print(f"[plugin] session_id={session_id}, control_path={_control_path_for_session(session_id)}")
 
-    if command.startswith('python3'):
-        saved_cwd = _get_saved_cwd(session_id)
-        if saved_cwd:
-            print(f"[plugin] replay cwd for {session_id}: cd {saved_cwd}")
-            cd_result = executor.execute(f"cd {saved_cwd}")
-            print(f"[plugin] replay cd result: {cd_result}")
-
     result = executor.execute(command)
-
-    if command.startswith('cd ') and result.startswith('当前远程目录：'):
-        new_cwd = result.replace('当前远程目录：', '', 1).strip()
-        if new_cwd:
-            _set_saved_cwd(session_id, new_cwd)
-            print(f"[plugin] save cwd for {session_id}: {new_cwd}")
 
     send_msg(result, msg.receiver)
     recv_next_msg(msg)
